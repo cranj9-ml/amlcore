@@ -1,9 +1,5 @@
 # Walkthrough: the project in 10 minutes
 
-A spoken-length tour, in five parts. Each part has what to say, the one number to
-remember, and the follow-up question it usually draws. The sections match the slides
-one to one.
-
 ---
 
 ## Part 1. The problem
