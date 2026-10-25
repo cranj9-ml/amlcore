@@ -1,0 +1,91 @@
+# Configuration for amlcore. Relative paths are resolved from the project root.
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  models_dir: models
+  reports_dir: reports
+
+data:
+  variant: HI-Small   # file prefix: data/raw/<variant>_Trans.csv and <variant>_Patterns.txt
+  # Drop transactions at or after this time (null = keep all). AMLworld's normal activity
+  # stops after Sep 10; the sparse tail after it is 59% laundering, an artifact of the
+  # simulator (docs/talking_points.md #1).
+  end: "2022-09-11 00:00"
+
+split:
+  # Temporal split by timestamp: first 60% of transactions train, next 20% validation,
+  # last 20% test. Never random (docs/talking_points.md #2).
+  train_frac: 0.6
+  val_frac: 0.2
+
+features:
+  windows: [1h, 24h, 7d]   # look-back windows [t - w, t); units m (minutes), h, d
+  # Account age ("time since first seen in the data") is capped here, and missing for this
+  # long after the data starts. Uncapped, it grows with the calendar, so test showed ages
+  # training never had (docs/talking_points.md #7).
+  age_cap: 48h
+
+rules:
+  # Scenario thresholds, set a priori from common AML practice, never tuned on test.
+  thresholds:
+    structuring_min_usd: 9000         # "just under" the $10k reporting threshold...
+    structuring_max_usd: 10000        # ...means [9000, 10000)
+    velocity_min_count: 10            # sender made >= 10 payments in the last 24h
+    fan_in_min_count: 10              # receiver got >= 10 payments in the last 24h
+    pass_through_min_ratio: 0.8       # payment is 80-120% of what the sender
+    pass_through_max_ratio: 1.2       # received in the last 24h
+    new_account_max_age_hours: 24     # sender first seen < 24h ago...
+    new_account_min_usd: 10000        # ...paying at least $10k
+  # rule_score = sum of weight x flag. Higher weights for scenarios that are more specific
+  # to laundering; cross-currency and raw velocity are common in normal business.
+  weights:
+    structuring: 2
+    velocity_24h: 1
+    fan_in_24h: 1
+    pass_through: 2
+    cross_currency: 1
+    new_account_large: 2
+
+model:
+  # LightGBM. Hyperparameters were tuned with Optuna (30 trials) on validation recall at
+  # the 0.5% budget; test was never used (docs/experiments.md).
+  # class_weighting: "none" (scale_pos_weight = 1) or "sqrt" (= sqrt(neg/pos), ~36 on
+  # HI-Small). Up-weighting positives hurt the ranking (docs/talking_points.md #4).
+  class_weighting: none
+  n_estimators: 2000          # upper bound; early stopping picks the actual number
+  learning_rate: 0.01570567215236399
+  num_leaves: 78
+  min_child_samples: 16
+  subsample: 0.7907538528163567         # row sampling per tree (bagging)
+  colsample_bytree: 0.4273280516513507  # feature sampling per tree
+  reg_lambda: 0.7817204711070311        # L2 penalty on leaf values
+  early_stopping_rounds: 100  # stop when validation average precision stalls this long
+  seed: 42
+
+evaluation:
+  alert_budgets: [0.001, 0.005, 0.01]   # fraction of transactions investigators can review
+  primary_budget: 0.005                 # the headline budget (top 0.5%)
+  # 95% block-bootstrap interval for headline recall: resample whole 6-hour blocks, because
+  # payments of one scheme cluster in time and are not independent.
+  bootstrap_block: 6h
+  bootstrap_resamples: 1000
+
+# Approximate USD value of one unit of each AMLworld currency, September 2022.
+# Used to put amounts on a common scale; precision beyond ~1% does not matter here.
+fx_to_usd:
+  US Dollar: 1.0
+  Euro: 0.99
+  UK Pound: 1.13
+  Swiss Franc: 1.03
+  Yen: 0.0069
+  Yuan: 0.143
+  Rupee: 0.0124
+  Ruble: 0.0166
+  Canadian Dollar: 0.75
+  Australian Dollar: 0.67
+  Brazil Real: 0.19
+  Mexican Peso: 0.050
+  Saudi Riyal: 0.266
+  Shekel: 0.29
+  Bitcoin: 20000.0
