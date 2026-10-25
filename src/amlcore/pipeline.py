@@ -12,6 +12,11 @@ Outputs in reports/<variant>/:
   alerts_test.csv      the test alert queue: top 0.5% with three reasons each
   shap_importance.csv  mean |SHAP| per feature, on a sample of test
   recall_vs_budget.png, shap_importance.png
+and, for the dashboard (app/dashboard.py), which reads only these files:
+  scores_test.parquet        every test row's model score, rule score and rule flags
+  features_top_test.parquet  features of the top 5% of test rows, for per-alert SHAP
+  typical_values.csv         training medians, the "typical" shown next to each reason
+  daily.csv                  transactions and laundering per day and split
 """
 
 from __future__ import annotations
@@ -31,13 +36,16 @@ from amlcore.explain import alert_queue, global_importance, shap_contributions, 
 from amlcore.features import build_features, feature_columns
 from amlcore.metrics import alert_count, evaluate, recall_by_typology, recall_interval, selection_probability
 from amlcore.model import fit_lightgbm, predict_scores
-from amlcore.rules import rule_score
+from amlcore.rules import rule_flags, rule_score
 
 RULES, MODEL = "rules", "lightgbm"
 SCORERS = (RULES, MODEL)
 EVAL_SPLITS = (VAL, TEST)
 SHAP_SAMPLE = 10_000  # rows for the global SHAP summary; mean |SHAP| is stable well before this
 CURVE_BUDGETS = np.geomspace(0.0005, 0.05, 41)  # 0.05% to 5% of transactions, for the chart
+MAX_DASHBOARD_BUDGET = 0.05  # the dashboard can explain alerts up to this budget
+SCORE_COLUMNS = ["txn_id", "timestamp", "src_id", "amount_usd", "payment_format_code", "is_laundering",
+                 "typology"]
 
 
 def features_path(config: Config) -> Path:
@@ -66,6 +74,10 @@ class RunResult:
     alerts: pd.DataFrame
     importance: pd.DataFrame
     curve: pd.DataFrame
+    scores_test: pd.DataFrame
+    features_top: pd.DataFrame
+    typical: pd.Series
+    daily: pd.DataFrame
     out_dir: Path
 
 
@@ -99,8 +111,10 @@ def run_train(config: Config, feats: pd.DataFrame | None = None) -> RunResult:
     }
 
     age_cap = parse_window(config.features.age_cap).total_seconds()
-    alerts = alert_queue(model, columns, test, scores[TEST][MODEL], typical_values(train, columns),
+    typical = typical_values(train, columns)
+    alerts = alert_queue(model, columns, test, scores[TEST][MODEL], typical,
                          config.rules, ev.primary_budget, config.currencies, age_cap)
+    scores_test = _scores_table(test, scores[TEST], config)
     sample = test.sample(min(SHAP_SAMPLE, len(test)), random_state=config.model.seed)
     result = RunResult(
         metrics=metrics,
@@ -108,6 +122,10 @@ def run_train(config: Config, feats: pd.DataFrame | None = None) -> RunResult:
         alerts=alerts,
         importance=global_importance(shap_contributions(model, sample[columns])[0]),
         curve=_recall_curve(y_test, scores[TEST]),
+        scores_test=scores_test,
+        features_top=_top_features(test, scores_test, columns),
+        typical=typical,
+        daily=_daily_summary(feats),
         out_dir=report_dir(config),
     )
     model_file = config.paths.models_dir / config.variant / "model.txt"
@@ -123,6 +141,31 @@ def _data_summary(parts: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
              "transactions": len(p), "laundering": int(p["is_laundering"].sum()),
              "base_rate": float(p["is_laundering"].mean())}
             for name, p in parts.items()]
+
+
+def _scores_table(test: pd.DataFrame, scores: dict[str, np.ndarray], config: Config) -> pd.DataFrame:
+    """One row per test transaction: ids, label, both scores and each rule's flag.
+
+    Enough for the dashboard to recompute every metric at any budget without the model.
+    """
+    out = test[SCORE_COLUMNS].assign(typology=test["typology"].astype(str), rule_score=scores[RULES],
+                                     model_score=scores[MODEL])
+    return pd.concat([out, rule_flags(test, config.rules.thresholds)], axis=1).reset_index(drop=True)
+
+
+def _top_features(test: pd.DataFrame, scores_test: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Features of the highest-scoring test rows, so any alert up to the dashboard's largest
+    budget can be explained without reading the full feature table."""
+    k = alert_count(len(test), MAX_DASHBOARD_BUDGET)
+    top = scores_test.nlargest(k, "model_score")["txn_id"]
+    return test.loc[test["txn_id"].isin(top), ["txn_id", *columns]].reset_index(drop=True)
+
+
+def _daily_summary(feats: pd.DataFrame) -> pd.DataFrame:
+    """Transactions and laundering per calendar day and split, for the data overview."""
+    day = feats["timestamp"].dt.floor("D").rename("day")
+    return (feats.groupby([day, "split"])["is_laundering"].agg(transactions="size", laundering="sum")
+            .reset_index())
 
 
 def _typology_table(test: pd.DataFrame, scores: dict[str, np.ndarray], budget: float) -> pd.DataFrame:
@@ -157,6 +200,10 @@ def write_outputs(result: RunResult, config: Config) -> None:
     result.typology.to_csv(out / "typology_recall.csv", index=False)
     result.alerts.to_csv(out / "alerts_test.csv", index=False)
     result.importance.to_csv(out / "shap_importance.csv", index=False)
+    result.scores_test.to_parquet(out / "scores_test.parquet", index=False)
+    result.features_top.to_parquet(out / "features_top_test.parquet", index=False)
+    result.typical.rename("typical").to_csv(out / "typical_values.csv", index_label="feature")
+    result.daily.to_csv(out / "daily.csv", index=False)
     (out / "report.md").write_text(render_report(result, config), encoding="utf-8")
     from amlcore.charts import chart_importance, chart_recall_vs_budget  # matplotlib only when writing
 
@@ -210,7 +257,7 @@ def render_report(result: RunResult, config: Config) -> str:
     typology_rows = [[r.typology, f"{r.positives:,}", _pct(r.recall_rules), _pct(r.recall_lightgbm)]
                      for r in result.typology.itertuples()]
     shap_rows = [[r.feature, f"{r.mean_abs_shap:.3f}"] for r in result.importance.head(10).itertuples()]
-    reason_share = result.alerts["reason_1"].str.replace(r"[0-9][0-9,.$]*", "N", regex=True)
+    reason_share = result.alerts["reason_1"].str.replace(r"(?<!past )\b[0-9][0-9,.]*", "N", regex=True)
     reason_rows = [[text, _pct(share)] for text, share in reason_share.value_counts(normalize=True).head(5).items()]
 
     ci = m["test_recall_interval"][MODEL]

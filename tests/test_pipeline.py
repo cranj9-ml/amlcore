@@ -11,27 +11,18 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-import yaml
 
-from amlcore.cli import main
-from amlcore.config import DEFAULT_CONFIG_PATH, DEMO_ROOT
+from amlcore.features import META_COLUMNS
 
 OUTPUTS = ["report.md", "metrics.json", "typology_recall.csv", "alerts_test.csv",
-           "shap_importance.csv", "recall_vs_budget.png", "shap_importance.png"]
+           "shap_importance.csv", "recall_vs_budget.png", "shap_importance.png",
+           "scores_test.parquet", "features_top_test.parquet", "typical_values.csv", "daily.csv"]
 
 
 @pytest.fixture(scope="module")
-def out(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Run the demo once through a config whose outputs all go to a temp folder."""
-    root = tmp_path_factory.mktemp("e2e")
-    raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text())
-    raw["paths"] = {"raw_dir": str(DEMO_ROOT / "raw"), "processed_dir": str(root / "processed"),
-                    "models_dir": str(root / "models"), "reports_dir": str(root / "reports")}
-    raw["data"] = {"variant": "DEMO", "end": None}
-    config_path = root / "config.yaml"
-    config_path.write_text(yaml.safe_dump(raw))
-    assert main(["run", "--config", str(config_path)]) == 0
-    return root
+def out(demo_run: Path) -> Path:
+    """The folder holding the demo run's processed, models and reports subfolders."""
+    return demo_run.parent
 
 
 def test_every_output_is_written(out: Path) -> None:
@@ -57,3 +48,20 @@ def test_report_leads_with_the_headline(out: Path) -> None:
     text = (out / "reports" / "DEMO" / "report.md").read_text()
     assert text.index("## Headline") < text.index("## Every budget")
     assert "accuracy" not in text.lower()
+
+
+def test_dashboard_outputs_cover_test_and_the_top_rows(out: Path) -> None:
+    reports = out / "reports" / "DEMO"
+    feats = pd.read_parquet(out / "processed" / "DEMO" / "features.parquet")
+    test = feats[feats["split"] == "test"]
+    scores = pd.read_parquet(reports / "scores_test.parquet")
+    assert len(scores) == len(test) and scores["is_laundering"].sum() == test["is_laundering"].sum()
+    assert {"model_score", "rule_score", "flag_structuring"} <= set(scores.columns)
+    top = pd.read_parquet(reports / "features_top_test.parquet")
+    assert len(top) == max(1, int(0.05 * len(test)))
+    assert set(top["txn_id"]) <= set(scores.nlargest(len(top), "model_score")["txn_id"])
+    assert len(top.columns) == 1 + 45 and not set(META_COLUMNS[1:]) & set(top.columns)
+    daily = pd.read_csv(reports / "daily.csv")
+    assert daily["transactions"].sum() == len(feats)
+    typical = pd.read_csv(reports / "typical_values.csv", index_col="feature")
+    assert len(typical) == 45

@@ -80,7 +80,7 @@ Needs Python 3.12 or later.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-python -m pytest                          # 86 tests, about 5 seconds
+python -m pytest                          # 100 tests, about 5 seconds
 python -m amlcore.cli run --demo          # whole pipeline on bundled synthetic data, seconds
 ```
 
@@ -99,6 +99,40 @@ Outputs go to `reports/HI-Small/`:
 - `alerts_test.csv`: the alert queue, each alert with three reasons and the rules that fired
 - the two charts
 
+## Dashboard
+
+A local Streamlit app for showing the model live: metrics at any alert budget, the alert
+queue with per-alert SHAP explanations, what drives the score, the rules baseline, and
+the data.
+
+```bash
+pip install -e '.[app]'
+streamlit run app/dashboard.py            # opens http://localhost:8501
+```
+
+It has two modes, switched in the sidebar:
+- **Saved run:** the HI-Small results that `python -m amlcore.cli run` wrote.
+- **Demo (live):** one click trains on the bundled synthetic data in seconds. The
+  numbers are toy-sized.
+
+![Dashboard overview: metrics at the chosen budget and the recall curve](docs/figures/dashboard_overview.png)
+
+![Alert queue: one alert's reasons and its SHAP contributions](docs/figures/dashboard_alert.png)
+
+The tabs:
+
+| Tab | What it shows |
+|---|---|
+| Overview | recall, precision and alerts for model and rules at the chosen budget; PR-AUC, the 95% interval, the recall-vs-budget curve |
+| Alert queue | the top-k alerts; select one to see its three reasons, the rules that fired and a SHAP chart of its top features |
+| What drives it | global SHAP importance, most common first reasons, recall by payment format and by typology |
+| Rules baseline | each rule's firing rate, precision when fired and share of laundering flagged |
+| Data | daily volume and laundering rate by split |
+
+The app only reads a run's saved outputs, so it opens in seconds even on 5 million
+transactions. Its logic is in `src/amlcore/showcase.py`, which is tested; the app's
+rendering is checked with Streamlit's `AppTest`.
+
 ## Documentation
 
 - **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md):** the project as a 10-minute story, from
@@ -116,7 +150,9 @@ Outputs go to `reports/HI-Small/`:
 configs/default.yaml   every setting, with why: tail cut, split, windows, rules, tuned model
 data/demo/raw/         small synthetic dataset in AMLworld's format (for tests and the demo)
 scripts/               data download
-src/amlcore/           config, data, features, rules, model, metrics, explain, pipeline, charts, cli
+src/amlcore/           config, data, features, rules, model, metrics, explain, pipeline, charts, cli,
+                       showcase (the dashboard's data logic)
+app/dashboard.py       the Streamlit dashboard
 tests/                 one test file per module, plus an end-to-end run
 docs/                  walkthrough, talking points, experiment record, figures
 ```

@@ -1,4 +1,5 @@
-"""Shared fixtures: a hand-written six-row variant, and the bundled synthetic demo data."""
+"""Shared fixtures: a hand-written six-row variant, the bundled synthetic demo data, and one
+full pipeline run on it."""
 
 from __future__ import annotations
 
@@ -7,8 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
-from amlcore.config import DEMO_ROOT, Config, load_config
+from amlcore.cli import main
+from amlcore.config import DEFAULT_CONFIG_PATH, DEMO_ROOT, Config, load_config
 from amlcore.data import build_transactions
 
 # Rows are deliberately out of time order. Bank "021174" checks leading zeros survive.
@@ -58,3 +61,21 @@ def demo_txns(config: Config) -> pd.DataFrame:
     raw = Path(DEMO_ROOT) / "raw"
     return build_transactions(raw / "DEMO_Trans.csv", (raw / "DEMO_Patterns.txt").read_text(),
                               config.fx_to_usd)
+
+
+@pytest.fixture(scope="session")
+def demo_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Run the CLI's `run` once on the demo data, every output in a temp folder.
+
+    Returns the config file's path; its variant is DEMO and its reports are under
+    <tmp>/reports/DEMO.
+    """
+    root = tmp_path_factory.mktemp("demo_run")
+    raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text())
+    raw["paths"] = {"raw_dir": str(DEMO_ROOT / "raw"), "processed_dir": str(root / "processed"),
+                    "models_dir": str(root / "models"), "reports_dir": str(root / "reports")}
+    raw["data"] = {"variant": "DEMO", "end": None}
+    config_path = root / "config.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    assert main(["run", "--config", str(config_path)]) == 0
+    return config_path

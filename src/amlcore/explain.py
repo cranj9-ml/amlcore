@@ -46,19 +46,30 @@ class Reason:
 # --- SHAP -------------------------------------------------------------------------------------
 
 
-def shap_contributions(model: lgb.LGBMClassifier, x: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+def shap_contributions(model: lgb.LGBMClassifier | lgb.Booster, x: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     """Per-row, per-feature contributions to the raw score, and the constant (expected value).
 
-    Uses the trees early stopping kept, the same ones that produce the scores.
+    Takes the fitted classifier or a booster loaded from model.txt. Uses the trees early
+    stopping kept, the same ones that produce the scores.
     """
-    raw = model.booster_.predict(x, pred_contrib=True, num_iteration=model.best_iteration_ or None)
+    booster, best = _booster(model)
+    raw = booster.predict(x, pred_contrib=True, num_iteration=best)
     contrib = pd.DataFrame(raw[:, :-1], columns=x.columns, index=x.index)
     return contrib, float(raw[0, -1]) if len(raw) else 0.0
 
 
-def raw_scores(model: lgb.LGBMClassifier, x: pd.DataFrame) -> np.ndarray:
+def raw_scores(model: lgb.LGBMClassifier | lgb.Booster, x: pd.DataFrame) -> np.ndarray:
     """The model's log-odds, the quantity SHAP decomposes."""
-    return model.booster_.predict(x, raw_score=True, num_iteration=model.best_iteration_ or None)
+    booster, best = _booster(model)
+    return booster.predict(x, raw_score=True, num_iteration=best)
+
+
+def _booster(model: lgb.LGBMClassifier | lgb.Booster) -> tuple[lgb.Booster, int | None]:
+    """The underlying booster and the iteration to predict with. A booster saved with
+    save_model already holds only the trees up to the best iteration."""
+    if isinstance(model, lgb.Booster):
+        return model, None
+    return model.booster_, model.best_iteration_ or None
 
 
 def global_importance(contrib: pd.DataFrame) -> pd.DataFrame:
